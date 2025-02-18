@@ -1,3 +1,11 @@
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
 from data.counties_id import counties
 import requests
 from bs4 import BeautifulSoup
@@ -82,16 +90,53 @@ def getSalesListingData(id: int):
 
 
 def getPropertyIdData(id: int):
-    """
-    Not yet finished.
-    """
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Referer": "https://salesweb.civilview.com/",
+        "Origin": "https://salesweb.civilview.com",
+    }
+
+    initialUrl = "https://salesweb.civilview.com/Home/Index"
+
+    initial_response = session.get(initialUrl, headers=headers, allow_redirects=True)
+
+    print("Request Headers from Initial Response:", initial_response.request.headers)
+
+    session.cookies.set(
+        name="ASP.NET_SessionId",
+        value="uk2r0fo4kfbylnffnhuugh3q",
+        domain="salesweb.civilview.com",
+        path="/",
+    )
+    print(session.cookies)
+
     url = f"https://salesweb.civilview.com/Sales/SaleDetails?PropertyId={id}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
+
+    response = session.get(url, headers=headers)
 
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, "html.parser")
-        rows = soup.find("div", class_="table-responsive").find_all("tr")
+        data_dict = {}
+        table = soup.find("table", class_="table table-striped")
+        if not table:
+            print("Table not found")
+            return None
+
+        table = soup.find("table", class_="table table-striped")
+        if not table:
+            print("Table not found")
+            return None
+
+        rows = table.find_all("tr")
+        for row in rows:
+            columns = row.find_all("td")
+            if len(columns) >= 2:
+                key = columns[0].get_text(strip=True).replace(":", "")
+                value = columns[1].get_text(" ", strip=True)
+                data_dict[key] = value
+
+        return data_dict
 
 
 def exportSalesListingData(id: int):
@@ -185,4 +230,5 @@ def exportAllSalesListingData():
 
 
 if __name__ == "__main__":
-    exportAllSalesListingData()
+    data = getPropertyIdData(1502507233)
+    print(data)
