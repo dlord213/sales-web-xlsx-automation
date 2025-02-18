@@ -1,21 +1,22 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import xlsxwriter
 from data.counties_id import counties
-import requests
+from data.small_counties import small_counties
 from bs4 import BeautifulSoup
-import re
-import csv
-import pandas as pd
 from datetime import date
 
+import requests
+import re
+import pandas as pd
 
-def extract_property_id(td):
+
+def extractPropertyId(td):
     """Extract Property ID from either href or onclick attributes."""
     link = td.find("a")
 
@@ -70,7 +71,7 @@ def getSalesListingData(id: int):
         if not cells:
             continue  # Skip empty rows
 
-        property_id = extract_property_id(
+        property_id = extractPropertyId(
             cells[0]
         )  # Extract Property ID from the first column
         row_data = [td.text.strip() for td in cells]
@@ -89,69 +90,114 @@ def getSalesListingData(id: int):
     }
 
 
-def getPropertyIdData(id: int):
-    session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Referer": "https://salesweb.civilview.com/",
-        "Origin": "https://salesweb.civilview.com",
-    }
+def getPropertyDetailsByCounty(county_id: int, headless=True):
+    listings = getSalesListingData(county_id)
 
-    initialUrl = "https://salesweb.civilview.com/Home/Index"
+    # Ensure listings is a dictionary before calling .get()
+    if not isinstance(listings, dict) or "data" not in listings or not listings["data"]:
+        county_name = (
+            listings.get("county", "Unknown County")
+            if isinstance(listings, dict)
+            else "Unknown County"
+        )
+        print(f"{county_name} doesn't have any listings.")
+        return (
+            []
+        )  # Return an empty list instead of None to prevent errors in calling functions
 
-    initial_response = session.get(initialUrl, headers=headers, allow_redirects=True)
+    options = webdriver.ChromeOptions()
+    if headless:
+        options.add_argument("--headless")  # Run in headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--blink-settings=imagesEnabled=false")
 
-    print("Request Headers from Initial Response:", initial_response.request.headers)
-
-    session.cookies.set(
-        name="ASP.NET_SessionId",
-        value="uk2r0fo4kfbylnffnhuugh3q",
-        domain="salesweb.civilview.com",
-        path="/",
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=options
     )
-    print(session.cookies)
 
-    url = f"https://salesweb.civilview.com/Sales/SaleDetails?PropertyId={id}"
+    try:
+        url = f"https://salesweb.civilview.com/Sales/SalesSearch?countyId={county_id}"
+        driver.get(url)
 
-    response = session.get(url, headers=headers)
+        wait = WebDriverWait(driver, 10)
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "table-striped")))
 
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, "html.parser")
-        data_dict = {}
-        table = soup.find("table", class_="table table-striped")
-        if not table:
-            print("Table not found")
-            return None
+        properties_data = []
 
-        table = soup.find("table", class_="table table-striped")
-        if not table:
-            print("Table not found")
-            return None
+        # Find "Details" buttons
+        details_buttons = driver.find_elements(
+            By.XPATH, "//a[contains(text(), 'Details')]"
+        )
 
-        rows = table.find_all("tr")
-        for row in rows:
-            columns = row.find_all("td")
-            if len(columns) >= 2:
-                key = columns[0].get_text(strip=True).replace(":", "")
-                value = columns[1].get_text(" ", strip=True)
-                data_dict[key] = value
+        if not details_buttons:
+            details_buttons = driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class, 'btn-primary') and contains(text(), 'Details')]",
+            )
 
-        return data_dict
+        num_properties = min(len(details_buttons), len(listings["data"]))
+
+        for i in range(num_properties):
+            try:
+                # Re-locate buttons in case the page reloads
+                details_buttons = driver.find_elements(
+                    By.XPATH, "//a[contains(text(), 'Details')]"
+                )
+
+                if not details_buttons:
+                    details_buttons = driver.find_elements(
+                        By.XPATH,
+                        "//div[contains(@class, 'btn-primary') and contains(text(), 'Details')]",
+                    )
+
+                wait.until(EC.element_to_be_clickable(details_buttons[i])).click()
+                wait.until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "table-striped"))
+                )
+
+                # Extract property data
+                property_data = {}
+                rows = driver.find_elements(
+                    By.XPATH, "(//table[@class='table table-striped'])[1]//tr"
+                )
+
+                for row in rows:
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    if len(cols) >= 2:
+                        key = cols[0].text.strip().replace(":", "")
+                        value = cols[1].text.strip()
+                        property_data[key] = value
+
+                properties_data.append(property_data)
+
+                # Go back to the listings page
+                driver.back()
+                wait.until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "table-striped"))
+                )
+
+            except Exception as e:
+                print(f"Error processing property {i+1}: {e}")
+
+        print(
+            f"Scraping complete for County ID {county_id}. Total properties: {len(properties_data)}"
+        )
+        return properties_data
+
+    except Exception as e:
+        print(f"Error scraping county {county_id}: {e}")
+        return []
+
+    finally:
+        driver.quit()
 
 
 def exportSalesListingData(id: int):
     """
-    This function is to export the data of every sales listing in a county depending on the id at the args.
+    This function exports the data of every sales listing in a county depending on the id at the args.
     """
-    csv_headers = [
-        "Property ID",
-        "Sheriff #",
-        "Sales Date",
-        "Plaintiff",
-        "Defendant",
-        "Address",
-    ]
-
     if id:
         url = f"https://salesweb.civilview.com/Sales/SalesSearch?countyId={id}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -160,75 +206,195 @@ def exportSalesListingData(id: int):
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
 
-            countyName: str = ""
-
+            # Extract county name
+            countyName = ""
             for county in counties:
                 if county["countyId"] == id:
                     countyName = county["name"]
 
-            last_updated: str = (
-                soup.find("small").getText().replace("last updated: ", "")
-            )
-            rows = soup.find("form").find_all("tr")
-            table_data = [
-                [re.search(r"\d+$", row.find("td").find("a")["href"]).group()]
-                + [td.text.strip() for td in row.find_all("td")[1:]]
-                for row in rows
-                if row.find("td") and row.find("td").find("a")
-            ]
+            # Extract last updated timestamp
 
-            with open(f"{countyName}_salesListing.csv", mode="w", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow(csv_headers)
-                writer.writerows(table_data)
+            # Find the table
+            table = soup.find("table", class_="table table-striped")
+            if table:
+                # Extract all rows
+                rows = table.find_all("tr")
+
+                # Extract headers from the first row (assuming the first row contains headers)
+                headers = [th.text.strip() for th in rows[0].find_all("th")]
+                headers.insert(0, "Property ID")  # Add Property ID as the first column
+
+                # Extract data from the remaining rows
+                table_data = []
+                for row in rows[1:]:  # Skip the header row
+                    # Extract Property ID from the Details link
+                    details_link = row.find("a", href=True)
+                    property_id = (
+                        re.search(r"\d+$", details_link["href"]).group()
+                        if details_link
+                        else "N/A"
+                    )
+
+                    # Extract row data
+                    row_data = [property_id] + [
+                        td.text.strip() for td in row.find_all("td")
+                    ]
+                    table_data.append(row_data)
+
+                # Create a DataFrame
+                df = pd.DataFrame(table_data, columns=headers)
+
+                # Write to Excel
+                excel_filename = f"{countyName}_salesListing.xlsx"
+                with pd.ExcelWriter(excel_filename, engine="xlsxwriter") as writer:
+                    df.to_excel(writer, index=False, sheet_name="Sales Listings")
+
+                    for column in df:
+                        column_length = max(
+                            df[column].astype(str).map(len).max(), len(column)
+                        )
+                        col_idx = df.columns.get_loc(column)
+                        writer.sheets["Sales Listings"].set_column(
+                            col_idx, col_idx, column_length
+                        )
+
+                print(f"Data exported to {excel_filename}")
+            else:
+                print("No table found.")
+        else:
+            print(f"Failed to fetch data. Status code: {response.status_code}")
+    else:
+        print("No county ID provided.")
 
 
 def exportAllSalesListingData():
-    xlsx_filename = f"{str(date.today())}.xlsx"
-    writer = pd.ExcelWriter(xlsx_filename, engine="xlsxwriter")
-    county_data = {}
+    xlsx_filename = f"Listings - {str(date.today())}.xlsx"
 
-    # Fetch data for each county
-    for county in counties:
-        data = getSalesListingData(county["countyId"])
+    # Create a new Excel file using xlsxwriter
+    with xlsxwriter.Workbook(xlsx_filename) as workbook:
+        # Fetch data for each county in parallel
+        with ThreadPoolExecutor(
+            max_workers=8
+        ) as executor:  # Adjust max_workers based on your system's capabilities
+            futures = {
+                executor.submit(getSalesListingData, county["countyId"]): county["name"]
+                for county in counties
+            }
 
-        if not data or not data.get("data"):
-            print(f"No data found for {county['name']}")
-            continue
+            for future in as_completed(futures):
+                county_name = futures[future]
+                try:
+                    data = future.result()  # Get the result of the scraping task
+                    if not data or not data.get("data"):
+                        print(f"No data found for {county_name}")
+                        continue
 
-        county_data[county["name"]] = data
+                    # Create a new sheet for the county
+                    sheet_name = county_name[
+                        :31
+                    ]  # Sheet names are limited to 31 characters
+                    worksheet = workbook.add_worksheet(sheet_name)
 
-    # Write data to Excel
-    for county, data in county_data.items():
-        if "column_names" not in data or not data["column_names"]:
-            continue
+                    # Write the header row
+                    headers = data.get("column_names", [])
+                    for col_idx, header in enumerate(headers):
+                        worksheet.write(0, col_idx, header)
 
-        df = pd.DataFrame(data["data"], columns=data["column_names"])
-        df = df.drop_duplicates()
+                    # Write the data rows
+                    for row_idx, row_data in enumerate(
+                        data["data"], start=1
+                    ):  # Start from row 1 (after header)
+                        for col_idx, value in enumerate(row_data):
+                            worksheet.write(row_idx, col_idx, value)
 
-        sheet_name = county[:31]  # Sheet names are limited to 31 characters
+                    # Auto-adjust column widths
+                    for col_idx, header in enumerate(headers):
+                        max_length = max(
+                            len(str(header)),  # Header length
+                            max(
+                                len(str(row_data[col_idx]))
+                                for row_data in data[
+                                    "data"
+                                ]  # Longest value in the column
+                            ),
+                        )
+                        worksheet.set_column(
+                            col_idx, col_idx, max_length + 2
+                        )  # Add padding
 
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    # Hyperlink the first column (Property ID)
+                    link_format = workbook.add_format(
+                        {"font_color": "blue", "underline": 1}
+                    )
+                    for row_idx, prop_id in enumerate(data["data"], start=1):
+                        if (
+                            prop_id and str(prop_id[0]).isdigit()
+                        ):  # Ensure it's a valid ID
+                            link = f"https://salesweb.civilview.com/Sales/SaleDetails?PropertyId={prop_id[0]}"
+                            worksheet.write_url(
+                                row_idx, 0, link, link_format, str(prop_id[0])
+                            )
 
-        worksheet = writer.sheets[sheet_name]
-        workbook = writer.book
-        link_format = workbook.add_format({"font_color": "blue", "underline": 1})
+                except Exception as e:
+                    print(f"Error processing {county_name}: {e}")
 
-        # Set column width dynamically
-        for idx, col in enumerate(df.columns):
-            max_length = max(df[col].astype(str).map(len).max(), len(col))
-            worksheet.set_column(idx, idx, max_length)
-
-        # Always hyperlink the first column (Property ID)
-        for row_num, prop_id in enumerate(df.iloc[:, 0], start=1):  # First column only
-            if pd.notna(prop_id) and str(prop_id).isdigit():  # Ensure it's a valid ID
-                link = f"https://salesweb.civilview.com/Sales/SaleDetails?PropertyId={prop_id}"
-                worksheet.write_url(row_num, 0, link, link_format, str(prop_id))
-
-    writer.close()
     print(f"Excel file '{xlsx_filename}' created successfully.")
 
 
+def exportAllSalesListingDetailsDataFromCounty():
+    xlsx_filename = f"Properties - {str(date.today())}.xlsx"
+
+    with xlsxwriter.Workbook(xlsx_filename) as workbook:
+        with ThreadPoolExecutor(
+            max_workers=8
+        ) as executor:  # Adjust max_workers based on your system's capabilities
+            futures = {
+                executor.submit(getPropertyDetailsByCounty, county["countyId"]): county[
+                    "name"
+                ]
+                for county in small_counties
+            }
+
+            for future in as_completed(futures):
+                county_name = futures[future]
+                try:
+                    data = future.result()  # Get the result of the scraping task
+                    if not data:
+                        print(f"No data found for {county_name}")
+                        continue
+
+                    worksheet = workbook.add_worksheet(
+                        county_name[:31]
+                    )  # Sheet name must be <= 31 chars
+
+                    headers = list(
+                        data[0].keys()
+                    )  # Extract headers from the first row of data
+                    for col_idx, header in enumerate(headers):
+                        worksheet.write(0, col_idx, header)
+
+                    # Write the data rows
+                    for row_idx, row_data in enumerate(
+                        data, start=1
+                    ):  # Start from row 1 (after header)
+                        for col_idx, key in enumerate(headers):
+                            worksheet.write(row_idx, col_idx, row_data.get(key, ""))
+
+                    for col_idx, header in enumerate(headers):
+                        max_length = max(
+                            len(str(header)),
+                            max(
+                                len(str(row_data.get(header, ""))) for row_data in data
+                            ),
+                        )
+                        worksheet.set_column(col_idx, col_idx, max_length + 2)
+
+                except Exception as e:
+                    print(f"Error processing {county_name}: {e}")
+
+    print(f"Scraping complete! Data saved to {xlsx_filename}")
+
+
 if __name__ == "__main__":
-    data = getPropertyIdData(1502507233)
-    print(data)
+    exportAllSalesListingData()
+    exportAllSalesListingDetailsDataFromCounty()
