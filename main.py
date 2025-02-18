@@ -143,6 +143,7 @@ def exportAllSalesListingData():
     writer = pd.ExcelWriter(xlsx_filename, engine="xlsxwriter")
     county_data = {}
 
+    # Fetch data for each county
     for county in counties:
         data = getSalesListingData(county["countyId"])
 
@@ -152,6 +153,7 @@ def exportAllSalesListingData():
 
         county_data[county["name"]] = data
 
+    # Write data to Excel
     for county, data in county_data.items():
         if "column_names" not in data or not data["column_names"]:
             continue
@@ -159,9 +161,24 @@ def exportAllSalesListingData():
         df = pd.DataFrame(data["data"], columns=data["column_names"])
         df = df.drop_duplicates()
 
-        sheet_name = county[:31]
+        sheet_name = county[:31]  # Sheet names are limited to 31 characters
 
         df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        worksheet = writer.sheets[sheet_name]
+        workbook = writer.book
+        link_format = workbook.add_format({"font_color": "blue", "underline": 1})
+
+        # Set column width dynamically
+        for idx, col in enumerate(df.columns):
+            max_length = max(df[col].astype(str).map(len).max(), len(col))
+            worksheet.set_column(idx, idx, max_length)
+
+        # Always hyperlink the first column (Property ID)
+        for row_num, prop_id in enumerate(df.iloc[:, 0], start=1):  # First column only
+            if pd.notna(prop_id) and str(prop_id).isdigit():  # Ensure it's a valid ID
+                link = f"https://salesweb.civilview.com/Sales/SaleDetails?PropertyId={prop_id}"
+                worksheet.write_url(row_num, 0, link, link_format, str(prop_id))
 
     writer.close()
     print(f"Excel file '{xlsx_filename}' created successfully.")
